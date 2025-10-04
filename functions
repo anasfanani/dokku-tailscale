@@ -239,7 +239,7 @@ tailscale_attach() {
     --env TS_HOSTNAME="${hostname}" \
     --env TS_EXTRA_ARGS="--advertise-tags=tag:dokku ${login_arg} ${ts_extra_args}" \
     --env TS_STATE_DIR=/var/lib/tailscale \
-    --volume "${storage_directory}":/var/lib/tailscale \
+    --volume "${DOKKU_LIB_HOST_ROOT:+${DOKKU_LIB_HOST_ROOT}}${storage_directory}":/var/lib/tailscale \
     --volume /dev/net/tun:/dev/net/tun \
     --cap-add=NET_ADMIN \
     --cap-add=SYS_MODULE \
