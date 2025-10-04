@@ -14,7 +14,6 @@ export SERVICE_PLUGIN
 case "$PHASE" in
   post-create|post-create-complete)
     if tailscale_is_enabled; then
-      dokku_log_info1 "attaching tailscale sidecar for service ${SERVICE_PLUGIN}.${SERVICE} after ${PHASE}"
       tailscale_attach || dokku_log_warn "failed to attach tailscale for ${SERVICE_PLUGIN}.${SERVICE}"
     fi
     ;;

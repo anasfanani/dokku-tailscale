@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+export PLUGIN_TAILSCALE_IMAGE=${PLUGIN_TAILSCALE_IMAGE:=tailscale/tailscale:latest}

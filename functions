@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config"
 set -eo pipefail
 [[ $DOKKU_TRACE ]] && set -x
 
@@ -53,10 +54,11 @@ get_target_name() {
 
 get_hostname() {
   declare desc="get the hostname to use on the tailnet"
+  local hostname_prefix="$(config_get --global TS_HOSTNAME_PREFIX)"
   if is_service_mode; then
-  echo "${SERVICE_PLUGIN}-${SERVICE}"
+    echo "${hostname_prefix:+${hostname_prefix}-}${SERVICE_PLUGIN}-${SERVICE}"
   else
-    echo "$APP"
+    echo "${hostname_prefix:+${hostname_prefix}-}${APP}"
   fi
 }
 
@@ -81,16 +83,16 @@ get_tailscale_container_name() {
 get_storage_directory() {
   declare desc="get the storage directory for tailscale state"
   if is_service_mode; then
-  echo "${DOKKU_LIB_ROOT}/data/tailscale/services/${SERVICE_PLUGIN}/${SERVICE}"
+    echo "/data/tailscale/services/${SERVICE_PLUGIN}/${SERVICE}"
   else
-    echo "${DOKKU_LIB_ROOT}/data/tailscale/${APP}"
+    echo "/data/tailscale/${APP}"
   fi
 }
 
 tailscale_up() {
   local target_name="$(get_target_name)"
   local hostname="$(get_hostname)"
-  local storage_directory="$(get_storage_directory)"
+  local storage_directory="${DOKKU_LIB_ROOT}$(get_storage_directory)"
   
   # Validate target (app or service)
   if is_service_mode; then
@@ -126,11 +128,10 @@ tailscale_up() {
   touch "${storage_directory}/DOKKU_ENABLED"
 
   # For services, there is no post-deploy hook to auto-attach. Start the sidecar now.
-  if is_service_mode; then
-    dokku_log_info1 "attaching tailscale sidecar for service ${target_name}"
+  # if is_service_mode; then
     # tailscale_attach is idempotent and will no-op if already running
     tailscale_attach || dokku_log_fail "Failed to attach tailscale sidecar for ${target_name}"
-  fi
+  # fi
 }
 
 tailscale_detach() {
@@ -149,16 +150,15 @@ tailscale_detach() {
 
   container_id=$("$DOCKER_BIN" ps -qaf "name=${tailscale_container_name}")
   if [[ -n "$container_id" ]] ; then
-    dokku_log_info1 "stopping tailscale container ${tailscale_container_name}"
-    "$DOCKER_BIN" container stop "${container_id}"
-    dokku_log_info1 "removing tailscale container ${tailscale_container_name}"
-    "$DOCKER_BIN" container rm "${container_id}"
+    "$DOCKER_BIN" container stop "${container_id}" >/dev/null 2>&1 || dokku_log_fail "Failed to stop tailscale sidecar for ${target_name}"
+    "$DOCKER_BIN" container rm "${container_id}" >/dev/null 2>&1 || dokku_log_fail "Failed to remove tailscale sidecar for ${target_name}"
+    dokku_log_info1 "Tailscale stopped: ${tailscale_container_name}"
   fi
 }
 
 tailscale_down() {
   local target_name="$(get_target_name)"
-  local storage_directory="$(get_storage_directory)"
+  local storage_directory="${DOKKU_LIB_ROOT}$(get_storage_directory)"
   
   # Validate target (app or service)
   if is_service_mode; then
@@ -175,7 +175,7 @@ tailscale_down() {
 
 tailscale_is_enabled() {
   local target_name="$(get_target_name)"
-  local storage_directory="$(get_storage_directory)"
+  local storage_directory="${DOKKU_LIB_ROOT}$(get_storage_directory)"
   
   # Validate target (app or service)
   # For enabled check we only need the state file, skip service verification to allow early lifecycle phases.
@@ -187,7 +187,7 @@ tailscale_attach() {
   local hostname="$(get_hostname)"
   local container_name="$(get_container_name)"
   local tailscale_container_name="$(get_tailscale_container_name)"
-  local storage_directory="$(get_storage_directory)"
+  local storage_directory="${DOKKU_LIB_HOST_ROOT:=$DOKKU_LIB_ROOT}$(get_storage_directory)"
   
   # Validate target (app or service)
   if is_service_mode; then
@@ -198,15 +198,6 @@ tailscale_attach() {
   fi
 
   ( ! tailscale_is_enabled ) && return
-
-  local authkey="$(config_get --global TS_AUTHKEY)"
-  [[ -z "$authkey" ]] && dokku_log_fail "Set the TS_AUTHKEY with dokku config:set --global"
-
-  local login_arg=""
-  local login_server="$(config_get --global TS_LOGIN_SERVER)"
-  [[ -n "${login_server}" ]] && login_arg="--login-server=${login_server}"
-
-  local ts_extra_args="$(config_get --global TS_EXTRA_ARGS)"
 
   # Set appropriate label for the container
   local label_arg=""
@@ -223,30 +214,79 @@ tailscale_attach() {
     local existing_running
     existing_running=$("$DOCKER_BIN" ps -qf "name=${tailscale_container_name}" || true)
     if [[ -n "$existing_running" ]]; then
-      dokku_log_info1 "tailscale container ${tailscale_container_name} already running"
+      dokku_log_info1 "Tailscale container ${tailscale_container_name} already running"
       return 0
     fi
-    dokku_log_info1 "removing stopped tailscale container ${tailscale_container_name}"
+    dokku_log_info1 "Removing stopped tailscale container ${tailscale_container_name}"
     "$DOCKER_BIN" container rm "$tailscale_container_name" >/dev/null 2>&1 || true
   fi
+  local authkey="$(config_get --global TS_AUTHKEY)"
+  [[ -z "$authkey" ]] && dokku_log_fail "Set the TS_AUTHKEY with dokku config:set --global"
 
-  dokku_log_info1 "starting tailscale container ${tailscale_container_name}"
-  "$DOCKER_BIN" container run \
-    "${label_arg}" \
-    $DOKKU_GLOBAL_RUN_ARGS \
-    --name "${tailscale_container_name}" \
-    --env TS_AUTHKEY="${authkey}" \
-    --env TS_HOSTNAME="${hostname}" \
-    --env TS_EXTRA_ARGS="--advertise-tags=tag:dokku ${login_arg} ${ts_extra_args}" \
-    --env TS_STATE_DIR=/var/lib/tailscale \
-    --volume "${DOKKU_LIB_HOST_ROOT:+${DOKKU_LIB_HOST_ROOT}}${storage_directory}":/var/lib/tailscale \
-    --volume /dev/net/tun:/dev/net/tun \
-    --cap-add=NET_ADMIN \
-    --cap-add=SYS_MODULE \
-    --restart unless-stopped \
-    --network "container:${container_name}" \
-    --detach \
-    tailscale/tailscale:latest
+  local login_server="$(config_get --global TS_LOGIN_SERVER)"
+  [[ -n "${login_server}" ]] && ts_extra_args+=" --login-server=${login_server}"
+
+  local extra_args="$(config_get --global TS_EXTRA_ARGS)"
+  [[ -n "${extra_args}" ]] && ts_extra_args+=" ${extra_args}"
+
+  local tag_name="$(config_get --global TS_TAG_NAME || echo "dokku")"
+  ts_extra_args+=" --advertise-tags=tag:${tag_name}"
+
+  read -ra _dokku_global_run_args <<< "$DOKKU_GLOBAL_RUN_ARGS"
+
+  local ts_run_args
+  declare -a ts_run_args
+  ts_run_args=()
+  ts_run_args+=("${label_arg}")
+  ts_run_args+=("${_dokku_global_run_args[@]}")
+  ts_run_args+=("--name" "${tailscale_container_name}")
+  ts_run_args+=("--env" "TS_AUTHKEY=${authkey}")
+  ts_run_args+=("--env" "TS_HOSTNAME=${hostname}")
+  ts_run_args+=("--env" "TS_EXTRA_ARGS=${ts_extra_args}")
+  ts_run_args+=("--env" "TS_STATE_DIR=/var/lib/tailscale")
+  ts_run_args+=("--volume" "${storage_directory}:/var/lib/tailscale")
+  ts_run_args+=("--volume" "/dev/net/tun:/dev/net/tun")
+  ts_run_args+=("--cap-add=NET_ADMIN")
+  ts_run_args+=("--cap-add=SYS_MODULE")
+  ts_run_args+=("--restart" "unless-stopped")
+  ts_run_args+=("--network" "container:${container_name}")
+  ts_run_args+=("--detach")
+  ts_run_args+=("${PLUGIN_TAILSCALE_IMAGE}")
+
+  dokku_log_info1 "Starting tailscale container for ${target_name}: ${tailscale_container_name}"
+  # "$DOCKER_BIN" container run "${ts_run_args[@]}"
+
+  # Start container and get ID
+  container_id=$("$DOCKER_BIN" container run "${ts_run_args[@]}")
+
+  # Wait for Tailscale to get an IP (simple polling)
+  for i in {1..5}; do
+    # Check if container is still running
+    if ! "$DOCKER_BIN" ps -q --filter "id=${container_id}" | grep -q .; then
+      dokku_log_fail "Tailscale container failed to start"
+    fi
+    
+    # Try to get IP
+    if tailscale_ip=$("$DOCKER_BIN" exec "${container_id}" tailscale ip --4 2>/dev/null); then
+      if [[ -n "$tailscale_ip" ]]; then
+        dokku_log_info1 "Tailscale connected with IP: ${tailscale_ip}"
+        break
+      fi
+    fi
+    
+    # Last attempt failed
+    if [[ $i -eq 5 ]]; then
+      dokku_log_warn "Tailscale failed to get IP after 5 seconds"
+      "$DOCKER_BIN" logs "${tailscale_container_name}" 2>&1 | head -n 50 || true
+      tailscale_down
+      return 1
+    fi
+    
+    dokku_log_info1 "Waiting for Tailscale to get an IP..."
+    sleep 1
+  done
+  
+  
 }
 
 tailscale_serve_start() {
@@ -332,7 +372,7 @@ tailscale_report_single() {
     target_name="${SERVICE_PLUGIN}.${SERVICE}"
   fi
   local hostname="$(get_hostname)"
-  local storage_directory="$(get_storage_directory)"
+  local storage_directory="${DOKKU_LIB_ROOT}$(get_storage_directory)"
   local tailscale_container_name="$(get_tailscale_container_name)"
   local enabled="false"
   [[ -f "${storage_directory}/DOKKU_ENABLED" ]] && enabled="true"
